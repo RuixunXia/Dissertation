@@ -1,1 +1,498 @@
+library(readxl)
+library(lme4)     
+library(car)       
+library(MatchIt)  
+library(AER)       
+library(dplyr)     
+library(haven)
+library(lmerTest) 
+library(ggplot2)  
 
+### visualization and data preprocessing ###
+# data preprocessing
+# 1.input original data
+setwd('D:/研究数据') 
+library(readxl)
+df <- read_xlsx("finaldata.xlsx")
+str(df)
+
+# 2.extract columns
+library(dplyr)
+new_df <- df %>%
+  select(site_id, site, province, date, year, month, day, latitude,longtitude, observation_field_meter,
+         airtemperature_mean, airtemperature_max, dewpointtemperature, sealevelpressure, winddirection, windspeedrate, 
+         skyconditiontotalcoveragecode,v13,`_8h_max`)
+
+# 3.rename columns
+new_df <- new_df %>%
+  rename(longitude = longtitude,
+         tem = airtemperature_mean,
+         tem_max = airtemperature_max ,
+         dew_tem = dewpointtemperature ,
+         slp = sealevelpressure ,
+         wd = winddirection ,
+         wsr = windspeedrate ,
+         sctc = skyconditiontotalcoveragecode ,
+         lpd = v13 ,
+         O3_8h_max = `_8h_max`)
+
+colnames(new_df)
+
+# 4.check NA
+# 5.replace NA into mean
+new_df$dew_tem <- ifelse(is.na(new_df$dew_tem), mean(new_df$dew_tem, na.rm = TRUE), new_df$dew_tem)
+new_df$slp <- ifelse(is.na(new_df$slp), mean(new_df$slp, na.rm = TRUE), new_df$slp)
+new_df$wd <- ifelse(is.na(new_df$wd), mean(new_df$wd, na.rm = TRUE), new_df$wd)
+new_df$wsr <- ifelse(is.na(new_df$wsr), mean(new_df$wsr, na.rm = TRUE), new_df$wsr)
+new_df$sctc <- ifelse(is.na(new_df$sctc), mean(new_df$sctc, na.rm = TRUE), new_df$sctc)
+new_df$lpd <- ifelse(is.na(new_df$lpd), mean(new_df$lpd, na.rm = TRUE), new_df$lpd)
+new_df$O3_8h_max <- ifelse(is.na(new_df$O3_8h_max), mean(new_df$O3_8h_max, na.rm = TRUE), new_df$O3_8h_max)
+
+# 6.unit transformation
+new_df <- new_df %>%
+  mutate(tem = tem/10,
+         tem_max = tem_max/10,
+         dew_tem = dew_tem/10,
+         slp = slp/10,
+         wsr = wsr/10,
+         lpd = lpd/10)
+new_df$latitude <- new_df$latitude / 100
+new_df$longitude <- new_df$longitude / 100
+
+# 7.the numbers of sites and provinces in data set
+num_sites <- new_df %>% 
+  distinct(site_id) %>%
+  nrow()
+
+num_provinces <- new_df %>%
+  distinct(province) %>%
+  nrow()
+cat("Number of unique sites:", num_sites, "\n")
+cat("Number of unique provinces:", num_provinces, "\n")
+
+# 8.O3 transformation 
+# 8.1.box.cox transformation of O3
+library(MASS)
+ozone_data <- new_df$O3_8h_max
+if (any(ozone_data <= 0)) {
+  ozone_data <- ozone_data + abs(min(ozone_data)) + 1
+}
+
+# best fitted lambda
+boxcox_result <- boxcox(ozone_data ~ 1, plotit = TRUE)
+best_lambda <- boxcox_result$x[which.max(boxcox_result$y)]
+
+# apply box.cox transformation
+if (best_lambda == 0) {
+  # if lambda equals to 0 then using log transformation 
+  new_df$O3_8h_max_boxcox <- log(ozone_data)
+} else {
+  new_df$O3_8h_max_boxcox <- (ozone_data^best_lambda - 1) / best_lambda
+}
+
+# histogram of box.cox O3
+hist(new_df$O3_8h_max_boxcox, breaks = 30, col = "skyblue", border = "black",
+     main = "Histogram of Box-Cox Transformed Max 8-Hour Ozone Concentration",
+     xlab = "Box-Cox Transformed Ozone Concentration (µg/m³)")
+
+# QQ plot of box.cox O3
+qqnorm(new_df$O3_8h_max_boxcox)
+qqline(new_df$O3_8h_max_boxcox, col = "red", lwd = 2)
+
+# 9. establish binary variable
+new_df$max_tem_35 <- ifelse(new_df$tem_max >= 35, 1, 0)
+
+# 10. variable standardization
+new_df <- new_df %>%
+  mutate(
+    tem_max_scaled = scale(tem_max),
+    tem_scaled = scale(tem),
+    dew_tem_scaled = scale(dew_tem),
+    slp_scaled = scale(slp),
+    wd_scaled = scale(wd),
+    wsr_scaled = scale(wsr),
+    sctc_scaled = scale(sctc),
+    lpd_scaled = scale(lpd)
+  )
+
+# 11. factor transformation
+new_df$site_id <- factor(new_df$site_id)
+
+save(new_df, file = "D:/研究数据/new_df.RData")
+
+# 12. descriptive statistics
+summary(new_df)
+total_summary <- new_df %>%
+  select(max_tem_35,O3_8h_max, tem, tem_max, dew_tem, slp, wsr, wd, sctc, lpd, latitude, observation_field_meter) %>%
+  summarise_all(list(
+    Mean = ~mean(., na.rm = TRUE),
+    Median = ~median(., na.rm = TRUE),
+    SD = ~sd(., na.rm = TRUE),
+    Min = ~min(., na.rm = TRUE),
+    Max = ~max(., na.rm = TRUE)
+  ))
+print(total_summary)  
+
+# grouped descriptive statistics
+group_summary <- new_df %>%
+  select(max_tem_35,O3_8h_max, tem, tem_max, dew_tem, slp, wsr, wd, sctc, lpd,latitude, observation_field_meter) %>%
+  group_by(max_tem_35) %>%
+  summarise(across(
+    everything(), 
+    list(
+      Mean = ~mean(., na.rm = TRUE),
+      Median = ~median(., na.rm = TRUE),
+      SD = ~sd(., na.rm = TRUE),
+      Min = ~min(., na.rm = TRUE),
+      Max = ~max(., na.rm = TRUE)
+    ), 
+    .names = "{col}_{fn}"
+  ),
+  count = n()
+  )
+print(group_summary)
+save(group_summary, file = "D:/研究数据/group_summary.RData")
+
+# 13. visualization
+# heat of density distribution between tem_max and O3 
+ggplot(new_df, aes(x = tem_max, y = O3_8h_max)) +
+  stat_density_2d(aes(fill = ..density..), geom = "raster", contour = FALSE) +
+  scale_fill_viridis_c() +
+  labs(title = "Density of Max Temperature and MDA8 O3", x = "Max Temperature (°C)", y = "Max O3 8h (µg/m³)") +
+  theme_minimal()
+
+# heat map 
+library(sf)
+library(ggplot2)
+library(ggspatial)
+library(ggsci)
+setwd("D:/研究数据/202405更新_2024年省市县三级行政区划数据（审图号：GS（2024）0650号）/202405更新_2024年省市县三级行政区划数据（审图号：GS（2024）0650号）/shp格式的数据（调整过行政区划代码，补全省市县信息）")
+s <- read_sf('省.shp')
+plot(s)
+
+# sites distribution
+ggplot() +
+  geom_sf(data = s, fill = "lightgrey", color = "black", size = 0.3) +  
+  geom_point(data = new_df, aes(x = longitude, y = latitude), color = "darkblue", size = 1.5, alpha = 0.8) +
+  annotation_scale(location = "bl", width_hint = 0.3, text_cex = 0.8, line_width = 1) +  
+  annotation_north_arrow(location = "tr", which_north = "true", 
+                         style = north_arrow_fancy_orienteering, height = unit(1, "cm"), width = unit(1, "cm")) + 
+  labs(title = "Site Distribution", x = "Longitude", y = "Latitude") +
+  theme_bw() +
+  theme(panel.grid.major = element_line(color = "lightgray", size = 0.1),
+        panel.grid.minor = element_blank(),
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 12, face = "bold"),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+
+# annual temperature heat map
+c <- read_sf('市.shp') #city level map
+
+# annually average temperature and O3 concentrations
+df_summary <- new_df %>%
+  group_by(site_id, site, province, latitude, longitude, year) %>%
+  summarise(
+    avg_tem_max = mean(tem_max, na.rm = TRUE),
+    avg_tem = mean(tem, na.rm = TRUE),
+    avg_O3_8h_max = mean(O3_8h_max, na.rm = TRUE) 
+  ) %>%
+  ungroup()
+
+# extract the first two words of site and city
+df_summary <- df_summary %>%
+  mutate(city_name = substr(site, 1, 2))  
+
+c <- c %>%
+  mutate(city_name = substr(市名, 1, 2))  
+# merge data sets
+city_map_data <- c %>%
+  left_join(df_summary, by = "city_name")
+
+city_map_data <- city_map_data %>%
+  filter(!is.na(site_id))
+
+# annually average temperature and O3 concentrations from May to September
+filtered_df <- new_df %>%
+  filter(month >= 5 & month <= 9)
+
+summary_df <- filtered_df %>%
+  group_by(year, site_id, site, province, latitude, longitude) %>%
+  summarise(
+    avg_tem_max = mean(tem_max, na.rm = TRUE),
+    avg_tem = mean(tem, na.rm = TRUE),
+    avg_O3_8h_max = mean(O3_8h_max, na.rm = TRUE)
+  )%>%
+  ungroup()
+
+# extract the first two words of site and city
+summary_df <- summary_df %>%
+  mutate(city_name = substr(site, 1, 2))  
+
+c <- c %>%
+  mutate(city_name = substr(市名, 1, 2)) 
+
+# merge data sets
+city_map_data_maysep <- c %>%
+  left_join(summary_df, by = "city_name")
+
+city_map_data_maysep <- city_map_data_maysep %>%
+  filter(!is.na(site_id))
+
+save(city_map_data_maysep, file = "D:/研究数据/group_summary.RData")
+
+# customized map
+pal <- c("#00008FFF", "#0000F2FF", "#0063FFFF", "#00D4FFFF", "#46FFB8FF", "#B8FF46FF", "#FFD400FF", "#FF6300FF", "#F00000FF", "#800000FF")
+custom_theme <- theme_bw() + 
+  theme(
+    legend.position = "right", 
+    text = element_text(size = 12),
+    plot.title = element_text(size = 16),
+    legend.title = element_text(size = 12)
+  )
+
+png(filename = "D:/研究数据/yearly_may_spet_avg_max_temp_large.png", width = 4000, height = 2000, res = 200)
+ggplot() +
+  geom_sf(data = c, fill = NA, color = "black") +
+  geom_sf(data = city_map_data_maysep, aes(fill = avg_tem_max)) +
+  scale_fill_gradient2(low = "blue", mid = "orange", high = "red", 
+                       midpoint = median(city_map_data_maysep$avg_tem_max, na.rm = TRUE),
+                       name = "Avg Max Temp (°C)", na.value = "white") +
+  facet_wrap(~ year,ncol = 5) + 
+  labs(title = " 2014-2023 May to September Average Max_tem", x = "", y = "") +
+  custom_theme +
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks  = element_blank())
+dev.off()
+
+png(filename = "D:/研究数据/yearly_may_spet_O3_large.png", width = 4000, height = 2000, res = 200)
+ggplot() +
+  geom_sf(data = c, fill = NA, color = "black") +
+  geom_sf(data = city_map_data_maysep, aes(fill = avg_O3_8h_max)) +
+  scale_fill_gradient2(low = "blue", mid = "orange", high = "red", 
+                       midpoint = median(city_map_data_maysep$avg_O3_8h_max, na.rm = TRUE),
+                       name = "Avg Ozone Concentration (µg/m³)", na.value = "white") +
+  facet_wrap(~ year,ncol = 5) + 
+  labs(title = " 2014-2023 May to September Average O3_8h", x = "", y = "") +
+  custom_theme +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks  = element_blank())
+dev.off()
+
+png(filename = "D:/研究数据/yearly_avg_max_temp_large.png", width = 4000, height = 2000, res = 200)
+ggplot() +
+  geom_sf(data = c, fill = NA, color = "black") +
+  geom_sf(data = city_map_data, aes(fill = avg_tem_max)) +
+  scale_fill_gradient2(low = "blue", mid = "orange", high = "red", 
+                       midpoint = median(city_map_data$avg_tem_max, na.rm = TRUE),
+                       name = "Avg Max Temp (°C)", na.value = "white") +
+  facet_wrap(~ year,ncol = 5) + 
+  labs(title = " 2014-2023 Average Max_tem", x = "", y = "") +
+  custom_theme +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks  = element_blank())
+dev.off()
+
+png(filename = "D:/研究数据/yearly_O3_large.png", width = 4000, height = 2000, res = 200)
+ggplot() +
+  geom_sf(data = c, fill = NA, color = "black") +
+  geom_sf(data = city_map_data, aes(fill = avg_O3_8h_max)) +
+  scale_fill_gradient2(low = "blue", mid = "orange", high = "red", 
+                       midpoint = median(city_map_data$avg_O3_8h_max, na.rm = TRUE),
+                       name = "Avg Ozone Concentration (µg/m³)", na.value = "white") +
+  facet_wrap(~ year,ncol = 5) + 
+  labs(title = " 2014-2023 Average O3_8h", x = "", y = "") +
+  custom_theme +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks  = element_blank())
+dev.off()
+
+### Statistical analysis part ####
+# Mixed effects model
+# 14.1.linear mixed effects model
+library(lme4) 
+library(lmerTest)
+library(sjPlot)
+lmm_model <- lmer(O3_8h_max_boxcox ~ max_tem_35 + dew_tem_scaled + slp_scaled + wd_scaled +
+                    wsr_scaled + sctc_scaled + lpd_scaled + (1 | site_id),
+                  data = new_df)
+summary(lmm_model)
+ranova(lmm_model)
+library(car)
+vif_values <- vif(lmm_model)
+print(vif_values)
+# Create a Word table for the model output with p-values using tab_model()
+tab_model(lmm_model, 
+          file = "D:/研究数据/lmm_output.doc",   # Saves the table as a Word document
+          show.p = TRUE,             # Show p-values in the output
+          show.se = TRUE,            # Show standard errors in the output
+          digits = 2)              # Set the number of decimal places
+
+# 14.2.Instrumental variable method
+library(AER)
+# latitude
+iv_model <- ivreg(O3_8h_max_boxcox ~ max_tem_35 + dew_tem_scaled + slp_scaled + wd_scaled + wsr_scaled + sctc_scaled + lpd_scaled |
+                    latitude + dew_tem_scaled + slp_scaled + wd_scaled +
+                    wsr_scaled + sctc_scaled + lpd_scaled, data = new_df)
+summary(iv_model, diagnostics = TRUE) 
+
+# linear mixed effect model (with IV)
+new_df$predicted_max_tem_35 <- predict(lm(max_tem_35 ~ latitude + dew_tem_scaled + slp_scaled + wd_scaled + wsr_scaled + sctc_scaled + lpd_scaled, data = new_df))
+
+lmm_model_iv <- lmer(O3_8h_max_boxcox ~ predicted_max_tem_35 + dew_tem_scaled + slp_scaled + wd_scaled + wsr_scaled + sctc_scaled + lpd_scaled + (1 | site_id),
+                     data = new_df)
+summary(lmm_model_iv)
+
+# altitude (choose this one)
+iv_model_observation <- ivreg(O3_8h_max_boxcox ~ max_tem_35 + dew_tem_scaled + slp_scaled + wd_scaled + wsr_scaled + sctc_scaled + lpd_scaled |
+                                observation_field_meter + dew_tem_scaled + slp_scaled + wd_scaled +
+                                wsr_scaled + sctc_scaled + lpd_scaled, data = new_df)
+summary(iv_model_observation, diagnostics = TRUE) 
+
+# Create a three-line formatted table 
+tab_model(iv_model_observation, 
+          file = "D:/研究数据/TSLS_Model_Summary.doc",   # Saves the table as a Word document
+          show.p = TRUE,             # Show p-values in the output
+          show.se = TRUE,            # Show standard errors in the output
+          digits = 2)                # Set the number of decimal places
+
+# linear mixed effect model (with IV)
+new_df$predicted_max_tem_35 <- predict(lm(max_tem_35 ~ observation_field_meter + dew_tem_scaled + slp_scaled + wd_scaled + wsr_scaled + sctc_scaled + lpd_scaled, data = new_df))
+
+lmm_model_iv <- lmer(O3_8h_max_boxcox ~ predicted_max_tem_35 + dew_tem_scaled + slp_scaled + wd_scaled + wsr_scaled + sctc_scaled + lpd_scaled + (1 | site_id),
+                     data = new_df) # negative and insignificant
+summary(lmm_model_iv)
+
+# Create a three-line formatted table 
+tab_model(lmm_model_iv, 
+          file = "D:/研究数据/lmm_model_iv_output.doc",   # Saves the table as a Word document
+          show.p = TRUE,             # Show p-values in the output
+          show.se = TRUE,            # Show standard errors in the output
+          digits = 2)                # Set the number of decimal places
+
+#Heckman two step
+probit_model <- glm(max_tem_35 ~ observation_field_meter + dew_tem_scaled + slp_scaled + wd_scaled + wsr_scaled + sctc_scaled + lpd_scaled, family = binomial(link = "probit"), data = new_df)
+summary(probit_model)
+
+new_df$predicted_max_tem_35 <- predict(probit_model, type = "link")
+new_df$IMR <- dnorm(new_df$predicted_max_tem_35) / pnorm(new_df$predicted_max_tem_35)
+
+lmm_model_iv_heckman <- lmer(O3_8h_max_boxcox ~ max_tem_35 + IMR + dew_tem_scaled + slp_scaled + wd_scaled + wsr_scaled + sctc_scaled + lpd_scaled + (1 | site_id),
+                     data = new_df) 
+summary(lmm_model_iv_heckman)
+tab_model(lmm_model_iv_heckman, 
+          file = "D:/研究数据/lmm_model_iv_heckman_output.doc",   # Saves the table as a Word document
+          show.p = TRUE,             # Show p-values in the output
+          show.se = TRUE,            # Show standard errors in the output
+          digits = 2)                # Set the number of decimal places
+
+# 14.3. Propensity score method
+# extract propensity score
+logit_model <- glm(max_tem_35 ~ latitude + observation_field_meter + month + tem_scaled + dew_tem_scaled + slp_scaled + wd_scaled + wsr_scaled + sctc_scaled + lpd_scaled, family = binomial,
+                   data = new_df) 
+summary(logit_model)
+new_df$propensity_score <- predict(logit_model, type = "response")
+
+# propensity score calibration
+lmm_model_psc <- lmer(O3_8h_max_boxcox ~ max_tem_35 + propensity_score + (1 | site_id), data = new_df)
+summary(lmm_model_psc)
+ranova(lmm_model_psc)
+
+# Create a Word table for the model output with p-values using tab_model()
+tab_model(lmm_model_psc, 
+          file = "D:/研究数据/lmm_model_psc_output.doc",   # Saves the table as a Word document
+          show.p = TRUE,             # Show p-values in the output
+          show.se = TRUE,            # Show standard errors in the output
+          digits = 2)              # Set the number of decimal places
+# Inverse probability weighting 
+new_df$weight <- ifelse(new_df$max_tem_35 == 1,
+                        1 / new_df$propensity_score,                # treated
+                        1 / (1 - new_df$propensity_score))          # controlled
+
+# Calculate stabilized weights
+p_treat <- mean(new_df$max_tem_35) # Proportion of treated units
+p_control <- 1 - p_treat # Proportion of control units
+
+stabilized_weights <- ifelse(new_df$max_tem_35 == 1, p_treat/new_df$propensity_score, 
+                             p_control / (1 - new_df$propensity_score))
+
+# Normalize the weights so that their sum equals the sample size
+normalized_weights <- stabilized_weights / mean(stabilized_weights)
+
+# Adding normalized weights to the data frame
+new_df$normalized_weights <- normalized_weights
+
+weighted_model_lmm <- lmer(O3_8h_max_boxcox ~ max_tem_35 + dew_tem_scaled + slp_scaled + 
+                             wd_scaled + wsr_scaled + sctc_scaled + lpd_scaled + (1 | site_id), data = new_df, weights = normalized_weights)
+summary(weighted_model_lmm)
+# Create a Word table for the model output with p-values using tab_model()
+tab_model(weighted_model_lmm, 
+          file = "D:/研究数据/weighted_model_lmm_output.doc",   # Saves the table as a Word document
+          show.p = TRUE,             # Show p-values in the output
+          show.se = TRUE,            # Show standard errors in the output
+          digits = 2)              # Set the number of decimal places
+
+# propensity score matching
+library(MatchIt)
+# many to one NN matching with replacement (choose this)
+psm_match_1 <- matchit(as.factor(max_tem_35) ~ month + latitude + observation_field_meter + tem + dew_tem + slp + wsr + sctc, 
+                       data = new_df, 
+                       method = "nearest",   # Nearest neighbor matching
+                       distance = "logit",   # Propensity score model based on logistic regression
+                       replace = TRUE,       # Allow replacement so that controls can be reused
+                       ratio = 2)            # Many-to-one matching (e.g., 2 control units per treated unit)
+summary(psm_match_1)
+plot(summary(psm_match_1)) #love plot
+library(cobalt)
+love.plot(psm_match_1, stats = c("c","ks"),
+          thresholds = c(cor = .1),
+          abs = TRUE, warp = 20,
+          limits = list(ks = c(0,.5)),
+          var.order = "unadjusted", line = TRUE)
+plot(psm_match_1, type = 'hist') #histogram
+# extract matched data
+matched_data_1 <- match.data(psm_match_1)
+save(matched_data_1, file = "D:/研究数据/matched_data_1.RData")
+
+# estimate the treatment effect (ATT)
+# Separate treated and control groups in the matched dataset
+treated <- matched_data_1[matched_data_1$max_tem_35 == 1, ]
+control <- matched_data_1[matched_data_1$max_tem_35 == 0, ]
+
+# Calculate weighted means for treated and control groups
+mean_treated <- weighted.mean(treated$O3_8h_max_boxcox, treated$weights, na.rm = TRUE)
+mean_control <- weighted.mean(control$O3_8h_max_boxcox, control$weights, na.rm = TRUE)
+ATT <- mean_treated - mean_control
+print(paste("Estimated ATT of high temperature on ozone levels:", ATT))
+
+# or using linear mixed effects regression model
+att_model <- lmer(O3_8h_max_boxcox ~ max_tem_35 + (1|site_id), data = matched_data_1, weights = weights)
+summary(att_model)
+ranova(att_model)
+# Create a Word table for the model output with p-values using tab_model()
+tab_model(att_model, 
+          file = "D:/研究数据/att_model_lmm_output.doc",   # Saves the table as a Word document
+          show.p = TRUE,             # Show p-values in the output
+          show.se = TRUE,            # Show standard errors in the output
+          digits = 2)              # Set the number of decimal places
+
+# PSM plus PSC
+logit_model_match <- glm(max_tem_35 ~ latitude + observation_field_meter + month + tem_scaled + dew_tem_scaled + slp_scaled + wd_scaled + wsr_scaled + sctc_scaled + lpd_scaled, family = binomial,
+                         data = matched_data_1) 
+
+summary(logit_model_match)
+matched_data_1$propensity_score_1 <- predict(logit_model_match, type = "response")
+
+lmm_psc_match <- lmer(O3_8h_max_boxcox ~ max_tem_35 + propensity_score_1 + (1 | site_id), data = matched_data_1)
+summary(lmm_psc_match)
+ranova(lmm_psc_match)
+
+# Create a Word table for the model output with p-values using tab_model()
+tab_model(lmm_psc_match, 
+          file = "D:/研究数据/lmm_psc_match_output.doc",   # Saves the table as a Word document
+          show.p = TRUE,             # Show p-values in the output
+          show.se = TRUE,            # Show standard errors in the output
+          digits = 2)              # Set the number of decimal places
